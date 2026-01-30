@@ -1,0 +1,1878 @@
+SEIR Model Final Analysis
+================
+
+# Week 1: Early 6-Week SEIIR Fit & Short-Term Projection
+
+## 1. Setup and Model Compilation
+
+This chunk loads the necessary library (`odin`), defines the initial
+6-week dataset, and compiles the SEIIR model structure.
+
+``` r
+############################################################
+# =========================  WEEK 1  =======================
+# EARLY 6-WEEK SEIIR FIT & SHORT-TERM PROJECTION
+############################################################
+########################################
+# 0. Libraries & Data
+########################################
+if(!requireNamespace("odin", quietly=TRUE)) install.packages("odin")
+
+# Example 6-week data
+data_weekly <- data.frame(
+  week  = 1:6,
+  Cases = c(5, 1, 14, 4, 10, 15)
+)
+
+t <- 1:6  # time in "weeks"
+
+########################################
+# 1. Compile the Odin Model
+########################################
+gen <- odin::odin({
+  initial(S) <- N - I0
+  initial(E) <- 0
+  initial(I1) <- I0 * p
+  initial(I2) <- I0 * (1 - p)
+  initial(R) <- 0
+   
+  deriv(S) <- -beta * (I1 + I2) / N * S
+  deriv(E) <-  beta * (I1 + I2) / N * S - sigma * E
+  deriv(I1) <- p * sigma * E - gamma * I1
+  deriv(I2) <- (1 - p) * sigma * E - gamma * I2
+  deriv(R) <- gamma * (I1 + I2)
+   
+  onset_mild <- p * sigma * E
+  onset_severe <- (1 - p) * sigma * E
+  onset_total <- onset_mild + onset_severe
+   
+  N     <- user(100000)
+  beta  <- user(0.3)
+  sigma <- user(0.25)
+  gamma <- user(0.2)
+  I0    <- user(1)
+  p     <- 0.9
+   
+  output(onset_mild) <- onset_mild
+  output(onset_severe) <- onset_severe
+  output(onset_total) <- onset_total
+})
+```
+
+    ## ── R CMD INSTALL ───────────────────────────────────────────────────────────────
+    ##   ─  installing *source* package 'odinc41e4e70' ... (827ms)
+    ##      ** using staged installation
+    ##      ** libs
+    ##      using C compiler: 'gcc.exe (GCC) 13.3.0'
+    ##      gcc  -I"C:/PROGRA~1/R/R-44~1.1/include" -DNDEBUG     -I"C:/RBuildTools/4.4/x86_64-w64-mingw32.static.posix/include"     -O2 -Wall -gdwarf-2 -mfpmath=sse -msse2 -mstackrealign  -UNDEBUG -Wall -pedantic -g -O0 -c odin.c -o odin.o
+    ##      odin.c: In function 'odin_metadata':
+    ##      odin.c:134:18: warning: unused variable 'internal' [-Wunused-variable]
+    ##      134 |   odin_internal *internal = odin_get_internal(internal_p, 1);
+    ##          |                  ^~~~~~~~
+    ##      odin.c: In function 'user_get_scalar_int':
+    ##    odin.c:258:47: warning: format '%d' expects argument of type 'int', but argument 2 has type 'const char *' [-Wformat=]
+    ##      258 |       Rf_error("Expected scalar integer for '%d'", name);
+    ##          |                                              ~^    ~~~~
+    ##          |                                               |    |
+    ##          |                                               int  const char *
+    ##          |                                              %s
+    ##      gcc  -I"C:/PROGRA~1/R/R-44~1.1/include" -DNDEBUG     -I"C:/RBuildTools/4.4/x86_64-w64-mingw32.static.posix/include"     -O2 -Wall -gdwarf-2 -mfpmath=sse -msse2 -mstackrealign  -UNDEBUG -Wall -pedantic -g -O0 -c registration.c -o registration.o
+    ##      gcc -shared -static-libgcc -o odinc41e4e70.dll tmp.def odin.o registration.o -LC:/RBuildTools/4.4/x86_64-w64-mingw32.static.posix/lib/x64 -LC:/RBuildTools/4.4/x86_64-w64-mingw32.static.posix/lib -LC:/PROGRA~1/R/R-44~1.1/bin/x64 -lR
+    ##      installing to C:/Users/SAUDH~1/AppData/Local/Temp/Rtmpq89rpK/devtools_install_3b4a6b669a/00LOCK-file3b46c537599/00new/odinc41e4e70/libs/x64
+    ##   ─  DONE (odinc41e4e70)
+    ## 
+
+## 2. Optimization (R0 Fit)
+
+This chunk defines the Sum of Squared Errors (SSE) function and loops
+through different Latent (L) and Infectious (D) periods to find the best
+`R0`.
+
+``` r
+########################################
+# 2. SSE function for given R0
+########################################
+# We'll define a function that:
+#  - sets sigma = 1/L, gamma = 1/D,
+#  - calculates beta from R0 & gamma,
+#  - runs the model,
+#  - returns sum of squared errors vs. data.
+
+square_error <- function(R0, L, D) {
+  # sigma = 1/L, gamma = 1/D
+  sigma_val <- 1 / L
+  gamma_val <- 1 / D
+   
+  # beta from R0 => beta = R0 * gamma
+  beta_val <- R0 * gamma_val
+   
+  # create a new model instance each time or re-use a global one
+  # but let's just create a new each time for clarity
+  mod <- gen$new()
+   
+  mod$set_user(
+    N     = 100000,
+    I0    = 1,          # set initial infected to 5
+    beta  = beta_val,
+    sigma = sigma_val,
+    gamma = gamma_val
+  )
+   
+  # run from t=1..6
+  out <- mod$run(t)
+  # model incidence
+  model_inc <- out[, "onset_total"]
+   
+  # Adjust model incidence to start with 5 at the first week
+  model_inc <- model_inc - model_inc[1] + 5
+   
+  # SSE
+  sse <- sum((model_inc - data_weekly$Cases)^2)
+  return(sse)
+}
+
+########################################
+# 3. Loop over L in {3,4}, D in {4,5}, optimize R0
+########################################
+L_values <- c(3, 4)
+D_values <- c(4, 5)
+
+# We'll store a data.frame with columns: L, D, best_R0, best_SSE
+results <- data.frame(L=numeric(), D=numeric(), best_R0=numeric(), best_SSE=numeric())
+
+for (L_val in L_values) {
+  for (D_val in D_values) {
+     
+    # We define an 'inner' function for optim just over R0:
+    sse_for_optim <- function(par_R0) {
+      # par_R0 is R0, must be > 0
+      if(par_R0[1] <= 0) return(1e15)  # penalty
+      sse <- square_error(R0=par_R0[1], L=L_val, D=D_val)
+      return(sse)
+    }
+     
+    # initial guess for R0, say 1.5
+    start_R0 <- 1.5
+     
+    # run optim for R0 only (bounded so R0 > 0)
+    fit <- optim(
+      par     = start_R0,
+      fn      = sse_for_optim,
+      method  = "L-BFGS-B",
+      lower   = 0.01,  # a small positive R0
+      upper   = 10      # or some max you think is plausible
+    )
+     
+    best_sse <- fit$value
+    best_r0  <- fit$par
+     
+    # store in results data.frame
+    results <- rbind(results,
+                     data.frame(L=L_val,
+                                D=D_val,
+                                best_R0=best_r0,
+                                best_SSE=best_sse))
+     
+    cat("L =", L_val, "D =", D_val, "=> best R0 =", best_r0, ", SSE =", best_sse, "\n")
+     
+  }
+}
+```
+
+    ## L = 3 D = 4 => best R0 = 9.782305 , SSE = 93.16182 
+    ## L = 3 D = 5 => best R0 = 10 , SSE = 106.0615 
+    ## L = 4 D = 4 => best R0 = 10 , SSE = 110.9848 
+    ## L = 4 D = 5 => best R0 = 10 , SSE = 135.2044
+
+``` r
+cat("\nAll results:\n")
+```
+
+    ## 
+    ## All results:
+
+``` r
+print(results)
+```
+
+    ##   L D   best_R0  best_SSE
+    ## 1 3 4  9.782305  93.16182
+    ## 2 3 5 10.000000 106.06155
+    ## 3 4 4 10.000000 110.98478
+    ## 4 4 5 10.000000 135.20443
+
+## 3. Best Fit Results & Plot
+
+This chunk extracts the best parameters found in the previous step and
+plots the model fit against the first 6 weeks of data.
+
+``` r
+# Identify which (L,D) gave the minimal SSE overall
+best_index <- which.min(results$best_SSE)
+cat("\nOverall best combination:\n")
+```
+
+    ## 
+    ## Overall best combination:
+
+``` r
+print(results[best_index, ])
+```
+
+    ##   L D  best_R0 best_SSE
+    ## 1 3 4 9.782305 93.16182
+
+``` r
+best_L   <- results[best_index, "L"]
+best_D   <- results[best_index, "D"]
+best_R0  <- results[best_index, "best_R0"]
+
+# compute beta from R0, gamma=1/D
+beta_best <- best_R0 * (1 / best_D)
+sigma_best <- 1 / best_L
+gamma_best <- 1 / best_D
+
+# run the model
+mod_final <- gen$new()
+mod_final$set_user(
+  N = 100000,
+  I0 = 1,  # set initial infected to 5
+  beta = beta_best,
+  sigma = sigma_best,
+  gamma = gamma_best
+)
+out_final <- mod_final$run(t)
+
+# Adjust model incidence to start with 5 at the first week
+out_final[, "onset_total"] <- out_final[, "onset_total"] - out_final[1, "onset_total"] + 5
+
+# Plot:
+plot(data_weekly$week, data_weekly$Cases,
+     pch = 16, col = "red",
+     xlab = "Week", ylab = "Number of Cases",
+     main = paste("Best L=", best_L, "D=", best_D, ", R0=", round(best_R0,2)),
+     ylim = c(0, max(data_weekly$Cases, out_final[, "onset_total"])))
+lines(t, out_final[, "onset_total"], col = "blue", lwd = 2)
+points(t, out_final[, "onset_total"], col = "blue", pch = 1)
+legend("topleft",
+       legend = c("Observed", "Model (best)"),
+       pch     = c(16,1),
+       col     = c("red","blue"),
+       lty     = c(NA,1),
+       lwd     = c(NA,2),
+       inset  = 0.03,
+       bty     = "n")
+```
+
+![](Outbreak_files/figure-gfm/week1_best_fit_plot-1.png)<!-- -->
+
+## 4. Projection
+
+This chunk extends the model to 12 weeks to project future cases based
+on the Week 1 fit.
+
+``` r
+########################################
+# 4. Projection for the next 6 weeks
+########################################
+# Extend the time vector to include the next 6 weeks
+t_extended <- 1:12
+
+# Run the model for the extended time period
+out_projection <- mod_final$run(t_extended)
+
+# Adjust model incidence to start with 5 at the first week
+out_projection[, "onset_total"] <- out_projection[, "onset_total"] - out_projection[1, "onset_total"] + 5
+
+# Plot the observed data (Weeks 1-6) in red:
+plot(data_weekly$week, data_weekly$Cases,
+     pch = 16, col = "red",
+     xlab = "Week", ylab = "Number of Cases",
+     main = paste("Projection for next 6 weeks\nBest L=", best_L, 
+                  "D=", best_D, ", R0=", round(best_R0,2)),
+     xlim = c(1, 12),  # so the x-axis goes up to Week 12
+     ylim = c(0, max(data_weekly$Cases, out_projection[, "onset_total"])))
+
+# --- draw a single continuous polyline first -------------------------
+lines(1:12, out_projection[ , "onset_total"], col = "blue", lwd = 2)
+
+# --- over-plot the projection segment in green so colour changes at wk 7
+proj_idx <- 6:12              # start at 6 so no gap
+lines(proj_idx, out_projection[proj_idx, "onset_total"],
+      col = "green", lwd = 2)
+
+# optional open circles on the green section
+points(proj_idx, out_projection[proj_idx, "onset_total"],
+       col = "green", pch = 1)
+
+# Finally, add a legend
+legend("topleft",
+       legend = c("Observed (Weeks 1-6)", 
+                  "Model Fit (Weeks 1-6)", 
+                  "Projection (Weeks 7-12)"),
+       pch     = c(16,1,1),
+       col     = c("red","blue","green"),
+       lty     = c(NA,1,1),
+       lwd     = c(NA,2,2),
+       inset  = 0.03,
+       bty     = "n")
+```
+
+![](Outbreak_files/figure-gfm/week1_projection-1.png)<!-- -->
+
+------------------------------------------------------------------------
+
+# Week 2: 12-Week SEIR Fit + Quarantine & Carnival
+
+## 1. Setup and Model (SEIR)
+
+This chunk updates the dataset to 12 weeks and defines a standard SEIR
+model structure (differing slightly from the Week 1 SEIIR model).
+
+``` r
+############################################################
+# =========================  WEEK 2  =======================
+# 12-WEEK SEIR FIT + QUARANTINE & CARNIVAL
+############################################################
+########################################
+# MASTER SCRIPT: Fit + Plot Peak with Quarantine
+########################################
+
+if(!requireNamespace("odin", quietly=TRUE)) {
+  install.packages("odin")
+}
+library(odin)
+library(ggplot2)
+
+########################################
+# 0) Example Data
+########################################
+# Suppose you have 12 weeks of incidence data
+# Adjust 'Cases' to your actual values
+data_weekly <- data.frame(
+  week = 1:12,
+  Cases= c(5, 1, 14, 4, 10, 19, 16, 21, 23, 36, 39, 54)
+)
+t_fit <- 1:12  # We'll compare model onset vs these weeks
+
+########################################
+# 1) Compile the Model
+########################################
+model_gen <- odin::odin({
+  ## Core equations for transitions between compartments:
+  # SEIR.R
+   
+  # Initial conditions
+  initial(S) <- N - I_0 - E_0
+  initial(E) <- E_0
+  initial(I) <- I_0
+  initial(R) <- 0
+   
+  # Equations
+  deriv(S) <- -beta * S * I / N
+  deriv(E) <- beta * S * I / N - gamma * E
+  deriv(I) <- gamma * E - sigma * I
+  deriv(R) <- sigma * I
+   
+  # Parameter values explicitly defined as user inputs
+  R_0 <- user(1.5)  # Basic reproduction number
+  L <- user(3.75/7) # Latent period (3.5-4 days)
+  D <- user(4.5/7)  # Infectious period (4-5 days)
+  I_0 <- user(5)    # Initial infectious cases
+  E_0 <- user(1)    # Initial exposed cases
+  N <- user(80000)  # Total population
+   
+  # Convert parameters
+  gamma <- 1 / L
+  sigma <- 1 / D
+  beta <- R_0 * sigma
+   
+  # Output: New cases per week (onset)
+  output(onset) <- gamma * E
+})
+```
+
+    ## ── R CMD INSTALL ───────────────────────────────────────────────────────────────
+    ##   ─  installing *source* package 'odin73e1b272' ... (718ms)
+    ##      ** using staged installation
+    ##      ** libs
+    ##      using C compiler: 'gcc.exe (GCC) 13.3.0'
+    ##      gcc  -I"C:/PROGRA~1/R/R-44~1.1/include" -DNDEBUG     -I"C:/RBuildTools/4.4/x86_64-w64-mingw32.static.posix/include"     -O2 -Wall -gdwarf-2 -mfpmath=sse -msse2 -mstackrealign  -UNDEBUG -Wall -pedantic -g -O0 -c odin.c -o odin.o
+    ##      odin.c: In function 'odin_metadata':
+    ##      odin.c:143:18: warning: unused variable 'internal' [-Wunused-variable]
+    ##      143 |   odin_internal *internal = odin_get_internal(internal_p, 1);
+    ##          |                  ^~~~~~~~
+    ##      odin.c: In function 'user_get_scalar_int':
+    ##    odin.c:248:47: warning: format '%d' expects argument of type 'int', but argument 2 has type 'const char *' [-Wformat=]
+    ##      248 |       Rf_error("Expected scalar integer for '%d'", name);
+    ##          |                                              ~^    ~~~~
+    ##          |                                               |    |
+    ##          |                                               int  const char *
+    ##          |                                              %s
+    ##      gcc  -I"C:/PROGRA~1/R/R-44~1.1/include" -DNDEBUG     -I"C:/RBuildTools/4.4/x86_64-w64-mingw32.static.posix/include"     -O2 -Wall -gdwarf-2 -mfpmath=sse -msse2 -mstackrealign  -UNDEBUG -Wall -pedantic -g -O0 -c registration.c -o registration.o
+    ##      gcc -shared -static-libgcc -o odin73e1b272.dll tmp.def odin.o registration.o -LC:/RBuildTools/4.4/x86_64-w64-mingw32.static.posix/lib/x64 -LC:/RBuildTools/4.4/x86_64-w64-mingw32.static.posix/lib -LC:/PROGRA~1/R/R-44~1.1/bin/x64 -lR
+    ##      installing to C:/Users/SAUDH~1/AppData/Local/Temp/Rtmpq89rpK/devtools_install_3b46ee031fa/00LOCK-file3b461e971b0/00new/odin73e1b272/libs/x64
+    ##   ─  DONE (odin73e1b272)
+    ## 
+
+## 2. Fitting R0, I0, E0
+
+This chunk uses `optim` to find the best values for R0, initial infected
+(I0), and initial exposed (E0) to fit the 12-week data.
+
+``` r
+########################################
+# 2) SSE Function
+########################################
+# We'll attempt to fit param = c(R0, I0, E0),
+# while we keep L=3.75/7, D=4.5/7, N=80000 as in the model code.
+# The code inside "SEIR.R" uses R_0, I_0, E_0 as user parameters,
+# so we override them at each iteration.
+
+sse_function <- function(par) {
+  R0_val <- par[1]   # R0
+  I0_val <- par[2]   # initial Infectious
+  E0_val <- par[3]   # initial Exposed
+   
+  # create model:
+  mod_tmp <- model_gen$new(
+    R_0 = R0_val,
+    I_0 = I0_val,
+    E_0 = E0_val,
+    N   = 80000    # from your code
+    # L=3.75/7, D=4.5/7 are defaults in the code, if you want to override you can
+    # or just let the code use them. e.g.:
+    # L = 3.75/7,
+    # D = 4.5/7
+  )
+   
+  out_tmp <- mod_tmp$run(t_fit)
+   
+  model_inc <- out_tmp[,"onset"]
+  obs_inc   <- data_weekly$Cases
+   
+  sse <- sum((model_inc - obs_inc)^2)
+  return(sse)
+}
+
+########################################
+# 3) Fit with 'optim'
+########################################
+# initial guesses: c(R0=1.5, I0=5, E0=1)
+start_par <- c(R0=1.5, I0=1, E0=1)
+
+# plausible bounds:
+# R0 in (0.1, 10), I0 in (0.01, 1e5), E0 in (0.01, 1e5)
+fit <- optim(
+  par     = start_par,
+  fn      = sse_function,
+  method  = "L-BFGS-B",
+  lower   = c(0.1, 0.01, 0.01),
+  upper   = c(10, 1e5, 1e5)
+)
+
+best_par <- fit$par
+best_sse <- fit$value
+
+cat("Best SSE =", best_sse, "\n")
+```
+
+    ## Best SSE = 154.5799
+
+``` r
+cat("Best-fitting parameters (R0, I0, E0):\n")
+```
+
+    ## Best-fitting parameters (R0, I0, E0):
+
+``` r
+print(best_par)
+```
+
+    ##       R0       I0       E0 
+    ## 1.287642 2.105662 2.619932
+
+``` r
+R0_fit <- best_par[1]
+I0_fit <- best_par[2]
+E0_fit <- best_par[3]
+D_fit <- 4.5/7
+L_fit <- 3.75/7
+sigma <- 1 / D_fit
+beta_fitted <- R0_fit * sigma
+```
+
+## 3. Baseline Fit & Peak Projection
+
+This chunk runs the model with the fitted parameters and plots the
+baseline projection out to 30 weeks to identify the peak.
+
+``` r
+########################################
+# 4) Final Model & Plot Baseline Fit (Weeks 1..12)
+########################################
+mod_final <- model_gen$new(
+  R_0 = R0_fit,
+  I_0 = I0_fit,
+  E_0 = E0_fit,
+  N   = 80000,
+  D = D_fit,
+  L = L_fit
+)
+out_final <- mod_final$run(t_fit)
+model_inc_fit <- out_final[,"onset"]
+
+# Compare to data
+plot(data_weekly$week, data_weekly$Cases,
+     pch=16, col="red",
+     xlab="Week", ylab="Weekly Incidence",
+     main="Fitted Model vs Observed (Weeks 1..12)",
+     ylim=c(0, max(data_weekly$Cases, model_inc_fit)))
+lines(t_fit, model_inc_fit, col="blue", lwd=2)
+points(t_fit, model_inc_fit, col="blue", pch=1)
+legend("topleft",
+       legend=c("Observed","Model"),
+       col=c("red","blue"), pch=c(16,1),
+       lty=c(NA,1), bty="n")
+```
+
+![](Outbreak_files/figure-gfm/week2_baseline_peak-1.png)<!-- -->
+
+``` r
+########################################
+# 5) Extend to see Peak (Weeks 1..30)
+########################################
+t_long <- 1:50
+out_long <- mod_final$run(t_long)
+inc_long <- out_long[,"onset"]
+
+peak_week <- which.max(inc_long)
+peak_inc  <- inc_long[peak_week]
+cat("Peak incidence at week =", peak_week,
+    "with ~", round(peak_inc,1), "cases\n")
+```
+
+    ## Peak incidence at week = 34 with ~ 1843.7 cases
+
+``` r
+########################################
+# 6) Plot Extended Incidence & Mark Peak
+########################################
+plot(t_long, inc_long, type="l", col="blue", lwd=2,
+     xlab="Week", ylab="Weekly Incidence",
+     main="Baseline Incidence (Extended to 30 Weeks)")
+points(t_long, inc_long, pch=16, col="blue")
+abline(v=peak_week, col="red", lty=2)
+legend("topleft",
+       legend=c("Incidence","Peak"),
+       col=c("blue","red"), lty=c(1,2), lwd=c(2,1), bty="n")
+```
+
+![](Outbreak_files/figure-gfm/week2_baseline_peak-2.png)<!-- -->
+
+## 4. Scenario: Quarantine
+
+This chunk simulates a “Quarantine” scenario where transmission (`beta`)
+is reduced by 30% after Week 12.
+
+``` r
+# Scenario with quarantine (30% reduction in beta) starting after the 12th week
+########################################
+
+# Initial model setup
+mod_quarantine <- model_gen$new(
+  R_0 = R0_fit,
+  I_0 = I0_fit,
+  E_0 = E0_fit,
+  N   = 80000,
+  D = D_fit,
+  L = L_fit
+)
+
+# Run the model for the first 12 weeks without quarantine
+out_pre_quarantine <- mod_quarantine$run(1:12)
+
+# Apply quarantine (30% reduction in beta) after the 12th week
+beta_quarantine <- beta_fitted * 0.7
+mod_quarantine$set_user(
+  D = D_fit, 
+  L = L_fit, 
+  R_0 = beta_quarantine / sigma, 
+  I_0 = out_pre_quarantine[12, "I"], 
+  E_0 = out_pre_quarantine[12, "E"], 
+  S = out_pre_quarantine[12, "S"], 
+  R = out_pre_quarantine[12, "R"]
+)
+
+# Run the model for the remaining weeks with quarantine
+out_post_quarantine <- mod_quarantine$run(13:80)
+
+# Combine the results
+data_quarantine <- rbind(
+  as.data.frame(out_pre_quarantine), 
+  as.data.frame(out_post_quarantine)
+)
+data_quarantine$Week <- 1:80
+
+# Plot the results
+plot(data_quarantine$Week, data_quarantine$onset, type="l", col="blue", lwd=2,
+     xlab="Week", ylab="Weekly Incidence",
+     main="Incidence with Quarantine (Starting After Week 12)")
+points(data_quarantine$Week, data_quarantine$onset, pch=16, col="blue")
+abline(v=12, col="red", lty=2)
+legend("topleft",
+       legend=c("Incidence","Quarantine Start"),
+       col=c("blue","red"), lty=c(1,2), lwd=c(2,1), bty="n")
+```
+
+![](Outbreak_files/figure-gfm/week2_quarantine-1.png)<!-- -->
+
+## 5. Scenario: Carnival
+
+This chunk calculates the baseline (no intervention) comparison and then
+simulates a “Carnival” scenario where transmission increases after Week
+12.
+
+``` r
+########################################
+# Baseline scenario without quarantine
+########################################
+
+# Initial model setup for baseline
+mod_baseline <- model_gen$new(
+  R_0 = R0_fit,
+  I_0 = I0_fit,
+  E_0 = E0_fit,
+  N   = 80000,
+  D = D_fit,
+  L = L_fit
+)
+
+# Run the model for the entire period without quarantine
+out_baseline <- mod_baseline$run(1:80)
+
+# Convert to dataframe
+data_baseline <- as.data.frame(out_baseline)
+data_baseline$Week <- 1:80
+
+# Plot the baseline results
+plot(data_baseline$Week, data_baseline$onset, type="l", col="green", lwd=2,
+     xlab="Week", ylab="Weekly Incidence",
+     main="Baseline Incidence (No Quarantine)")
+points(data_baseline$Week, data_baseline$onset, pch=16, col="green")
+```
+
+![](Outbreak_files/figure-gfm/week2_carnival-1.png)<!-- -->
+
+``` r
+# Find the maximum incidence and the week it occurred for both scenarios
+max_incidence_quarantine <- max(data_quarantine$onset)
+week_max_quarantine <- data_quarantine$Week[which.max(data_quarantine$onset)]
+
+max_incidence_baseline <- max(data_baseline$onset)
+week_max_baseline <- data_baseline$Week[which.max(data_baseline$onset)]
+
+# Report the results
+cat("Maximum incidence with quarantine: ", max_incidence_quarantine, " on week ", week_max_quarantine, "\n")
+```
+
+    ## Maximum incidence with quarantine:  52.39495  on week  12
+
+``` r
+cat("Maximum incidence without quarantine: ", max_incidence_baseline, " on week ", week_max_baseline, "\n")
+```
+
+    ## Maximum incidence without quarantine:  1843.724  on week  34
+
+``` r
+########################################
+# Scenario with increased contact rate due to carnival (20% increase in beta) starting after the 12th week
+########################################
+
+# Initial model setup
+mod_carnival <- model_gen$new(
+  R_0 = R0_fit,
+  I_0 = I0_fit,
+  E_0 = E0_fit,
+  N   = 80000,
+  D = D_fit,
+  L = L_fit
+)
+
+# Run the model for the first 12 weeks without increased contact rate
+out_pre_carnival <- mod_carnival$run(1:12)
+
+# Apply increased contact rate (20% increase in beta) after the 12th week
+beta_carnival <- beta_fitted * 0.9
+mod_carnival$set_user(
+  D = D_fit, 
+  L = L_fit, 
+  R_0 = beta_carnival / sigma, 
+  I_0 = out_pre_carnival[12, "I"], 
+  E_0 = out_pre_carnival[12, "E"], 
+  S = out_pre_carnival[12, "S"], 
+  R = out_pre_carnival[12, "R"]
+)
+
+# Run the model for the remaining weeks with increased contact rate
+out_post_carnival <- mod_carnival$run(13:80)
+
+# Combine the results
+data_carnival <- rbind(
+  as.data.frame(out_pre_carnival), 
+  as.data.frame(out_post_carnival)
+)
+data_carnival$Week <- 1:80
+
+# Plot the results
+plot(data_carnival$Week, data_carnival$onset, type="l", col="purple", lwd=2,
+     xlab="Week", ylab="Weekly Incidence",
+     main="Incidence with Increased Contact Rate (Starting After Week 12)")
+points(data_carnival$Week, data_carnival$onset, pch=16, col="purple")
+abline(v=12, col="red", lty=2)
+legend("topleft",
+       legend=c("Incidence","Carnival Start"),
+       col=c("purple","red"), lty=c(1,2), lwd=c(2,1), bty="n")
+```
+
+![](Outbreak_files/figure-gfm/week2_carnival-2.png)<!-- -->
+
+``` r
+# Find the maximum incidence and the week it occurred for the carnival scenario
+max_incidence_carnival <- max(data_carnival$onset)
+week_max_carnival <- data_carnival$Week[which.max(data_carnival$onset)]
+
+# Report the results
+cat("Maximum incidence with increased contact rate: ", max_incidence_carnival, " on week ", week_max_carnival, "\n")
+```
+
+    ## Maximum incidence with increased contact rate:  712.3073  on week  43
+
+## 6. Summary Comparison
+
+This chunk combines all Week 2 scenarios (Baseline, Quarantine,
+Carnival) into one plot for comparison.
+
+``` r
+########################################
+# Combine and Summarize Results
+########################################
+
+# Combine the results into one dataframe
+data_combined <- data.frame(
+  Week = 1:80,
+  Baseline = data_baseline$onset,
+  Quarantine = data_quarantine$onset,
+  Carnival = data_carnival$onset
+)
+
+# Find the maximum incidence and the week it occurred for each scenario
+max_incidence_baseline <- max(data_combined$Baseline)
+week_max_baseline <- data_combined$Week[which.max(data_combined$Baseline)]
+
+max_incidence_quarantine <- max(data_combined$Quarantine)
+week_max_quarantine <- data_combined$Week[which.max(data_combined$Quarantine)]
+
+max_incidence_carnival <- max(data_combined$Carnival)
+week_max_carnival <- data_combined$Week[which.max(data_combined$Carnival)]
+
+# Summarize the results
+summary_table <- data.frame(
+  Scenario = c("Baseline", "Quarantine", "Carnival"),
+  Max_Incidence = c(max_incidence_baseline, max_incidence_quarantine, max_incidence_carnival),
+  Peak_Week = c(week_max_baseline, week_max_quarantine, week_max_carnival)
+)
+
+# Print the summary table
+summary_table
+```
+
+    ##     Scenario Max_Incidence Peak_Week
+    ## 1   Baseline    1843.72427        34
+    ## 2 Quarantine      52.39495        12
+    ## 3   Carnival     712.30726        43
+
+``` r
+plot(data_combined$Week, data_combined$Baseline, type="l", col="green", lwd=2,
+     xlab="Week", ylab="Weekly Incidence",
+     main="Combined Incidence for Different Scenarios",
+     ylim=c(0, max(data_combined$Baseline, data_combined$Quarantine, data_combined$Carnival)))
+lines(data_combined$Week, data_combined$Quarantine, col="blue", lwd=2)
+lines(data_combined$Week, data_combined$Carnival, col="purple", lwd=2)
+points(data_combined$Week, data_combined$Baseline, pch=16, col="green")
+points(data_combined$Week, data_combined$Quarantine, pch=16, col="blue")
+points(data_combined$Week, data_combined$Carnival, pch=16, col="purple")
+abline(v=12, col="red", lty=2)
+legend("topleft",
+       legend=c("Baseline", "Quarantine", "Carnival", "Intervention Start"),
+       col=c("green", "blue", "purple", "red"), lty=c(1,1,1,2), lwd=c(2,2,2,1), bty="n")
+
+peak_labels <- c(
+  paste0("Baseline Peak: ", 
+         round(max_incidence_baseline, 1),
+         " (Week ", week_max_baseline, ")"),
+   
+  paste0("Quarantine Peak: ",
+         round(max_incidence_quarantine, 1),
+         " (Week ", week_max_quarantine, ")"),
+   
+  paste0("Carnival Peak: ",
+         round(max_incidence_carnival, 1),
+         " (Week ", week_max_carnival, ")")
+)
+maxY <- max(data_combined$Baseline, 
+            data_combined$Quarantine, 
+            data_combined$Carnival)
+
+# define 3 distinct positions, each 10% below the previous
+y_positions <- seq(from=0.8 * maxY, 
+                   to=0.6 * maxY,  # a range
+                   length.out=3)
+
+x_text <- 40  
+
+for (i in seq_along(peak_labels)) {
+  text(x_text, 
+       y_positions[i], 
+       labels = peak_labels[i], 
+       pos = 4,        # text to the right of (x,y)
+       cex = 0.9,      # text size
+       col = "black")
+}
+```
+
+![](Outbreak_files/figure-gfm/week2_summary_plot-1.png)<!-- -->
+
+------------------------------------------------------------------------
+
+# Week 3: 28-Week Grid-Search SEIR + Multi-Scenario
+
+## 1. Setup and Grid Search
+
+This chunk expands the dataset to 28 weeks and performs a grid search
+(loops) to optimize parameters `R0`, `I0`, `E0`, `D`, and `L`.
+
+``` r
+############################################################
+# =========================  WEEK 3  =======================
+# 28-WEEK GRID-SEARCH SEIR + MULTI-SCENARIO
+############################################################
+########################################
+# MASTER SCRIPT: Fit + Plot Peak, Quarantine, Carnival, Self-Isolation
+########################################
+
+if(!requireNamespace("odin", quietly=TRUE)) {
+  install.packages("odin")
+}
+library(odin)
+library(ggplot2)
+
+########################################
+# 0) 28-week data
+########################################
+data_weekly <- data.frame(
+  week = 1:28,
+  Cases = c(
+    5,1,14,4,10,19,16,21,23,36,39,54,
+    79,89,82,56,79,78,82,83,79,64,58,64,
+    59,76,65,43
+  )
+)
+t_fit <- 1:28  # We'll compare model onset vs these 28 weeks
+
+########################################
+# 1) Compile the Model (SEIR_WEEK2.R)
+########################################
+model_gen <- odin::odin({
+  # SEIR.R
+   
+  # Initial conditions
+  initial(S) <- N - I_0 - E_0 - R1
+  initial(E) <- E_0
+  initial(I) <- I_0
+  initial(R) <- R1
+   
+  # Equations
+  deriv(S) <- -beta * S * I / N
+  deriv(E) <- beta * S * I / N - gamma * E
+  deriv(I) <- gamma * E - sigma * I
+  deriv(R) <- sigma * I
+   
+  # Parameter values explicitly defined as user inputs
+  R_0 <- user(1.5)  # Basic reproduction number
+  L <- user(3.75/7) # Latent period (3.5-4 days)
+  D <- user(4.5/7)  # Infectious period (4-5 days)
+  I_0 <- user(5)    # Initial infectious cases
+  E_0 <- user(1)    # Initial exposed cases
+  N <- user(80000)
+  R1 <- user(0)# Total population
+   
+  # Convert parameters
+  gamma <- 1 / L
+  sigma <- 1 / D
+  beta <- R_0 * sigma
+   
+  # Output: New cases per week (onset)
+  output(onset) <- gamma * E
+})
+```
+
+    ## ── R CMD INSTALL ───────────────────────────────────────────────────────────────
+    ##   ─  installing *source* package 'odin7ad0d09b' ... (852ms)
+    ##      ** using staged installation
+    ##      ** libs
+    ##      using C compiler: 'gcc.exe (GCC) 13.3.0'
+    ##      gcc  -I"C:/PROGRA~1/R/R-44~1.1/include" -DNDEBUG     -I"C:/RBuildTools/4.4/x86_64-w64-mingw32.static.posix/include"     -O2 -Wall -gdwarf-2 -mfpmath=sse -msse2 -mstackrealign  -UNDEBUG -Wall -pedantic -g -O0 -c odin.c -o odin.o
+    ##      odin.c: In function 'odin_metadata':
+    ##      odin.c:148:18: warning: unused variable 'internal' [-Wunused-variable]
+    ##      148 |   odin_internal *internal = odin_get_internal(internal_p, 1);
+    ##          |                  ^~~~~~~~
+    ##      odin.c: In function 'user_get_scalar_int':
+    ##    odin.c:253:47: warning: format '%d' expects argument of type 'int', but argument 2 has type 'const char *' [-Wformat=]
+    ##      253 |       Rf_error("Expected scalar integer for '%d'", name);
+    ##          |                                              ~^    ~~~~
+    ##          |                                               |    |
+    ##          |                                               int  const char *
+    ##          |                                              %s
+    ##      gcc  -I"C:/PROGRA~1/R/R-44~1.1/include" -DNDEBUG     -I"C:/RBuildTools/4.4/x86_64-w64-mingw32.static.posix/include"     -O2 -Wall -gdwarf-2 -mfpmath=sse -msse2 -mstackrealign  -UNDEBUG -Wall -pedantic -g -O0 -c registration.c -o registration.o
+    ##      gcc -shared -static-libgcc -o odin7ad0d09b.dll tmp.def odin.o registration.o -LC:/RBuildTools/4.4/x86_64-w64-mingw32.static.posix/lib/x64 -LC:/RBuildTools/4.4/x86_64-w64-mingw32.static.posix/lib -LC:/PROGRA~1/R/R-44~1.1/bin/x64 -lR
+    ##      installing to C:/Users/SAUDH~1/AppData/Local/Temp/Rtmpq89rpK/devtools_install_3b4367aab/00LOCK-file3b4a9f4e3/00new/odin7ad0d09b/libs/x64
+    ##   ─  DONE (odin7ad0d09b)
+    ## 
+
+``` r
+########################################
+# 2) SSE Function
+########################################
+sse_function <- function(par) {
+  # par = c(R0, I0, E0, D, L)
+  R0_val <- par[1]
+  I0_val <- par[2]
+  E0_val <- par[3]
+  D_val  <- par[4]
+  L_val  <- par[5]
+   
+  mod_tmp <- model_gen$new(
+    R_0 = R0_val,
+    I_0 = I0_val,
+    E_0 = E0_val,
+    N    = 80000,
+    D    = D_val,
+    L    = L_val
+  )
+  out_tmp <- mod_tmp$run(t_fit)
+   
+  model_inc <- out_tmp[,"onset"]
+  obs_inc   <- data_weekly$Cases
+   
+  sse <- sum((model_inc - obs_inc)^2)
+  return(sse)
+}
+
+########################################
+# 3) Fit with 'optim'
+########################################
+start_par <- c(R0=1.5, I0=1, E0=1, D=4.5/7, L=3.75/7)
+fit <- optim(
+  par     = start_par,
+  fn      = sse_function,
+  method  = "L-BFGS-B",
+  lower   = c(0.1, 0.01, 0.01, 0.01, 0.01),
+  upper   = c(10,   30,   10,   10,   10)
+)
+
+best_par <- fit$par
+best_sse <- fit$value
+
+cat("Best SSE =", best_sse, "\n")
+```
+
+    ## Best SSE = 5604.448
+
+``` r
+cat("Best-fitting parameters (R0, I0, E0, D, L):\n")
+```
+
+    ## Best-fitting parameters (R0, I0, E0, D, L):
+
+``` r
+print(best_par)
+```
+
+    ##         R0         I0         E0          D          L 
+    ## 1.01238995 1.93801554 0.01000000 0.01000000 0.09633032
+
+``` r
+R0_fit <- 1.16
+I0_fit <- 16
+E0_fit <- 2
+D_fit  <- 0.90
+L_fit  <- 0.9
+
+sigma       <- 1 / D_fit
+gamma       <- 1 / L_fit
+beta_fitted <- R0_fit * sigma
+
+########################################
+# MASTER CODE: For-loop Fit + SSE
+########################################
+
+if(!requireNamespace("odin", quietly=TRUE)) {
+  install.packages("odin")
+}
+library(odin)
+library(ggplot2)
+
+########################################
+# 0) 28-week data
+########################################
+data_weekly <- data.frame(
+  week = 1:28,
+  Cases = c(
+    5,1,14,4,10,19,16,21,23,36,39,54,
+    79,89,82,56,79,78,82,83,79,64,58,64,
+    59,76,65,43
+  )
+)
+t_fit <- 1:28
+
+
+
+
+########################################
+# 2) SSE Function
+########################################
+calc_sse <- function(R0_val, I0_val, E0_val, D_val, L_val) {
+  # build model with these parameters
+  mod_tmp <- model_gen$new(
+    R_0 = R0_val,
+    I_0 = I0_val,
+    E_0 = E0_val,
+    N    = 80000,
+    D    = D_val,
+    L    = L_val
+  )
+  out_tmp <- mod_tmp$run(t_fit)
+  model_inc <- out_tmp[,"onset"]
+  obs_inc   <- data_weekly$Cases
+   
+  sse <- sum((model_inc - obs_inc)^2)
+  return(sse)
+}
+
+########################################
+# 3) For-Loop to Find Best SSE
+########################################
+
+# Example: we define small or moderate grids
+# (R0 in steps, I0 in steps, etc.)
+# Stage 1 - coarse
+best_sse <- Inf
+for(R0 in seq(1, 3, 0.2)){
+  for(I0 in seq(1, 15, 1)){
+    for(E0 in seq(1, 15, 1)){
+      for(D in seq(0.5,1,0.1)){
+        for(L in seq(0.4,1,0.1)){
+          sse <- calc_sse(R0, I0, E0, D, L)
+          if(sse<best_sse){
+            best_sse <- sse
+            best_par <- c(R0,I0,E0,D,L)
+          }}}}}}
+
+print(best_par)
+```
+
+    ## [1]  1.2 15.0  1.0  1.0  1.0
+
+``` r
+# Stage 2 - fine tuning (assuming best_par from stage 1)
+best_sse <- Inf
+for(R0 in seq(best_par[1]-0.2,best_par[1]+0.2,0.02)){
+  for(I0 in seq(best_par[2]-1,best_par[2]+1,0.2)){
+    for(E0 in seq(best_par[3]-1,best_par[3]+1,0.2)){
+      for(D in seq(best_par[4]-0.1,best_par[4]+0.1,0.02)){
+        for(L in seq(best_par[5]-0.1,best_par[5]+0.1,0.02)){
+          sse <- calc_sse(R0,I0,E0,D,L)
+          if(sse<best_sse){
+            best_sse <- sse
+            best_par_fine <- c(R0,I0,E0,D,L)
+          }}}}}}
+
+print(best_par_fine)
+```
+
+    ## [1]  1.16 16.00  2.00  0.90  0.90
+
+``` r
+R0_fit <- best_par_fine[1]
+I0_fit <- best_par_fine[2]
+E0_fit <- best_par_fine[3]
+D_fit  <- 4.5/7
+L_fit  <- 3.75/7
+
+########################################
+# 4) Final Model & Plot Fit
+########################################
+mod_final <- model_gen$new(
+  R_0=R0_fit,
+  I_0=I0_fit,
+  E_0=E0_fit,
+  N=80000,
+  D=D_fit,
+  L=L_fit
+)
+out_final <- mod_final$run(t_fit)
+model_inc_fit <- out_final[,"onset"]
+
+plot(data_weekly$week, data_weekly$Cases,
+     pch=16, col="red",
+     xlab="Week", ylab="Weekly Incidence",
+     main="Fitted Model vs Observed (Weeks 1..28)",
+     ylim=c(0, max(data_weekly$Cases, model_inc_fit)))
+lines(t_fit, model_inc_fit, col="blue", lwd=2)
+points(t_fit, model_inc_fit, col="blue", pch=1)
+legend("topleft",
+       legend=c("Observed","Model"),
+       col=c("red","blue"), pch=c(16,1),
+       lty=c(NA,1), bty="n")
+```
+
+![](Outbreak_files/figure-gfm/week3_grid_search-1.png)<!-- -->
+
+``` r
+cat("\nBEST SSE:", best_sse,
+    "\nBEST (R0, I0, E0, D, L):",
+    best_par,"\n")
+```
+
+    ## 
+    ## BEST SSE: 19102.76 
+    ## BEST (R0, I0, E0, D, L): 1.2 15 1 1 1
+
+## 2. Multi-Scenario Modeling
+
+This chunk recalculates the scenarios for Week 3: Baseline, Quarantine
+(Week 12), Carnival (Week 12), and adds a new “Self-Isolation” scenario
+(starting after Week 28).
+
+``` r
+########################################
+# 4) Baseline Scenario Over 1..40 Weeks
+########################################
+mod_baseline <- model_gen$new(
+  R_0 = R0_fit,
+  I_0 = I0_fit,
+  E_0 = E0_fit,
+  N   = 80000,
+  D   = D_fit,
+  L   = L_fit
+)
+
+out_baseline <- mod_baseline$run(1:40)
+data_baseline <- as.data.frame(out_baseline)
+data_baseline$Week <- 1:40
+
+max_inc_baseline <- max(data_baseline$onset)
+wk_max_baseline  <- which.max(data_baseline$onset)
+cat("Baseline peak incidence =", max_inc_baseline,
+    "at week", wk_max_baseline, "\n")
+```
+
+    ## Baseline peak incidence = 691.7059 at week 40
+
+``` r
+########################################
+# 5) Quarantine: 30% reduction after Week 12
+########################################
+mod_quarantine <- model_gen$new(
+  R_0 = R0_fit,
+  I_0 = I0_fit,
+  E_0 = E0_fit,
+  N   = 80000,
+  D   = D_fit,
+  L   = L_fit
+)
+
+# First run: 1..12
+out_pre_quar <- mod_quarantine$run(1:12)
+
+# Apply 30% cut
+beta_quar   <- beta_fitted * 0.7
+R0_quar_new <- beta_quar / sigma
+
+mod_quarantine$set_user(
+  R_0 = R0_quar_new,
+  I_0 = out_pre_quar[12,"I"],
+  E_0 = out_pre_quar[12,"E"],
+  # no S,R as user
+  D   = D_fit,
+  L   = L_fit
+)
+
+# Second run: 12..40
+out_post_quar <- mod_quarantine$run(12:40)
+
+# remove row 1 to avoid duplication of time=12
+df_post_quar   <- as.data.frame(out_post_quar)
+df_post_quar   <- df_post_quar[-1,]
+
+# Ensure quarantine runs for full 40 weeks
+# Ensure quarantine has exactly 40 rows
+data_quarantine <- rbind(
+  as.data.frame(out_pre_quar), 
+  as.data.frame(out_post_quar)[-1,]  # Remove duplicate Week 12 but not more
+)
+if(nrow(data_quarantine) < 40) {  # Ensure full 40 weeks
+  missing_rows <- 40 - nrow(data_quarantine)
+  data_quarantine <- rbind(data_quarantine, tail(data_quarantine, missing_rows))
+}
+data_quarantine$Week <- 1:40
+
+
+plot(data_quarantine$Week, data_quarantine$onset, type="l", col="blue", lwd=2,
+     xlab="Week", ylab="Weekly Incidence",
+     main="Incidence with Quarantine (Starting After Week 12)")
+points(data_quarantine$Week, data_quarantine$onset, pch=16, col="blue")
+abline(v=12, col="red", lty=2)
+legend("topleft",
+       legend=c("Incidence","Quarantine Start"),
+       col=c("blue","red"), lty=c(1,2), lwd=c(2,1), bty="n")
+```
+
+![](Outbreak_files/figure-gfm/week3_scenarios-1.png)<!-- -->
+
+``` r
+max_inc_quar   <- max(data_quarantine$onset)
+wk_max_quar    <- which.max(data_quarantine$onset)
+cat("Quarantine peak incidence =", max_inc_quar,
+    "at week", wk_max_quar, "\n")
+```
+
+    ## Quarantine peak incidence = 67.15567 at week 12
+
+``` r
+########################################
+# 6) Carnival: 20% increase after Week 12
+########################################
+mod_carnival <- model_gen$new(
+  R_0 = R0_fit,
+  I_0 = I0_fit,
+  E_0 = E0_fit,
+  N   = 80000,
+  D   = D_fit,
+  L   = L_fit
+)
+
+out_pre_carn <- mod_carnival$run(1:12)
+
+beta_carn  <- beta_fitted * 0.9
+R0_carn_new<- beta_carn / sigma
+
+mod_carnival$set_user(
+  R_0 = R0_carn_new,
+  I_0 = out_pre_carn[12,"I"],
+  E_0 = out_pre_carn[12,"E"],
+  D   = D_fit,
+  L   = L_fit
+)
+
+out_post_carn <- mod_carnival$run(12:40)
+df_post_carn  <- as.data.frame(out_post_carn)
+df_post_carn  <- df_post_carn[-1,]
+
+data_carnival <- rbind(as.data.frame(out_pre_carn), df_post_carn)
+data_carnival$Week <- 1:40
+
+max_inc_carn   <- max(data_carnival$onset)
+wk_max_carn    <- which.max(data_carnival$onset)
+cat("Carnival peak incidence =", max_inc_carn,
+    "at week", wk_max_carn, "\n")
+```
+
+    ## Carnival peak incidence = 121.5163 at week 40
+
+``` r
+#########################################
+# 7) Self-Isolation: 30% reduction after Week 28
+########################################
+
+# (1) Copy the first 28 weeks from the **Carnival scenario**
+data_selfisol <- data_carnival[data_carnival$Week <= 28, ]
+
+# (2) Ensure the self-isolation model starts from the last state of carnival
+mod_selfisol <- model_gen$new(
+  R_0 = R0_fit,  # Start with same R0
+  I_0 = tail(data_selfisol$I, 1),  # Take last I from carnival
+  E_0 = tail(data_selfisol$E, 1),
+  N   = 80000, 
+  D   = D_fit,
+  L   = L_fit
+)
+
+# Reduce transmission by 20% after week 28
+mod_selfisol$set_user(R_0 = R0_fit * 0.8)
+
+# (3) Run model for weeks 29-40
+out_post_self <- mod_selfisol$run(29:40)
+
+# (4) Convert to DataFrame & Ensure Column Matching
+df_post_self  <- as.data.frame(out_post_self)
+df_post_self$Week <- 29:40  # Assign correct weeks
+
+# Ensure all columns match before merging
+common_cols <- intersect(names(data_selfisol), names(df_post_self))
+df_post_self <- df_post_self[, common_cols]  # Keep only matching columns
+
+# (5) Merge datasets properly
+data_selfisol <- rbind(data_selfisol[, common_cols], df_post_self)
+
+# Ensure `Week` column is correct
+data_selfisol$Week <- 1:40
+
+# Find peak incidence for self-isolation scenario
+max_inc_self <- max(data_selfisol$onset)
+wk_max_self  <- which.max(data_selfisol$onset)
+cat("Self-Isolation peak incidence =", max_inc_self, "at week", wk_max_self, "\n")
+```
+
+    ## Self-Isolation peak incidence = 103.5253 at week 28
+
+## 3. Final Week 3 Plot
+
+This chunk combines all 4 scenarios from Week 3 into a single plot and
+provides a summary table of peak incidences.
+
+``` r
+########################################
+# 8) Combine & Summarize
+########################################
+df_baseline   <- as.data.frame(out_baseline)
+df_baseline$Week <- 1:40
+
+data_combined <- data.frame(
+  Week        = 1:40,
+  Baseline    = df_baseline$onset,
+  Quarantine = data_quarantine$onset,
+  Carnival    = data_carnival$onset,
+  SelfIsol    = data_selfisol$onset
+)
+
+max_inc_baseline    <- max(data_combined$Baseline)
+wk_max_baseline     <- which.max(data_combined$Baseline)
+max_inc_quarantine  <- max(data_combined$Quarantine)
+wk_max_quarantine   <- which.max(data_combined$Quarantine)
+max_inc_carnival    <- max(data_combined$Carnival)
+wk_max_carnival     <- which.max(data_combined$Carnival)
+max_inc_selfisol    <- max(data_combined$SelfIsol)
+wk_max_selfisol     <- which.max(data_combined$SelfIsol)
+
+summary_table <- data.frame(
+  Scenario=c("Baseline","Quarantine","Carnival","SelfIsolation"),
+  Max_Incidence=c(
+    max_inc_baseline,
+    max_inc_quarantine,
+    max_inc_carnival,
+    max_inc_selfisol
+  ),
+  Peak_Week=c(
+    wk_max_baseline,
+    wk_max_quarantine,
+    wk_max_carnival,
+    wk_max_selfisol
+  )
+)
+print(summary_table)
+```
+
+    ##        Scenario Max_Incidence Peak_Week
+    ## 1      Baseline     691.70589        40
+    ## 2    Quarantine      67.15567        12
+    ## 3      Carnival     121.51633        40
+    ## 4 SelfIsolation     103.52530        28
+
+``` r
+########################################
+# 9) Final Plot
+########################################
+plot(data_combined$Week, data_combined$Baseline, type="l", col="green", lwd=2,
+     xlab="Week", ylab="Weekly Incidence",
+     main="Combined Incidence for Different Scenarios (1..40)",
+     ylim=c(0, max(
+       data_combined$Baseline,
+       data_combined$Quarantine,
+       data_combined$Carnival,
+       data_combined$SelfIsol
+     ))
+)
+lines(data_combined$Week, data_combined$Quarantine, col="blue", lwd=2)
+lines(data_combined$Week, data_combined$Carnival,   col="purple", lwd=2)
+lines(data_combined$Week, data_combined$SelfIsol,   col="orange", lwd=2)
+
+points(data_combined$Week, data_combined$Baseline,   pch=16, col="green")
+points(data_combined$Week, data_combined$Quarantine, pch=16, col="blue")
+points(data_combined$Week, data_combined$Carnival,   pch=16, col="purple")
+points(data_combined$Week, data_combined$SelfIsol,   pch=16, col="orange")
+
+abline(v=12, col="red", lty=2) # pivot for Quarantine/Carnival
+abline(v=28, col="red", lty=2) # pivot for Self-Isolation
+
+legend("topleft",
+       legend=c("Baseline","Quarantine","Carnival","Self-Isol","Pivot Wk12","Pivot Wk28"),
+       col=c("green","blue","purple","orange","red","red"),
+       lty=c(1,1,1,1,2,2), lwd=c(2,2,2,2,1,1), bty="n")
+
+# optional text with peak info
+peak_labels <- c(
+  paste0("Baseline Peak: ", round(max_inc_baseline, 1),
+         " (Week ", wk_max_baseline, ")"),
+  paste0("Quarantine Peak: ", round(max_inc_quarantine,1),
+         " (Week ", wk_max_quarantine, ")"),
+  paste0("Carnival Peak: ",   round(max_inc_carnival,1),
+         " (Week ", wk_max_carnival, ")"),
+  paste0("Self-Isol Peak: ",   round(max_inc_selfisol,1),
+         " (Week ", wk_max_selfisol, ")")
+)
+maxY <- max(data_combined$Baseline, data_combined$Quarantine,
+            data_combined$Carnival, data_combined$SelfIsol)
+
+y_positions <- seq(from=0.85 * maxY, to=0.55 * maxY, length.out=4)
+x_text <- 25
+
+for (i in seq_along(peak_labels)) {
+  text(x_text, y_positions[i], labels=peak_labels[i],
+       pos=4, cex=0.9, col="black")
+}
+```
+
+![](Outbreak_files/figure-gfm/week3_final_plot-1.png)<!-- -->
+
+------------------------------------------------------------------------
+
+# Week 4: Piecewise-Beta, SSE vs MLE, Re(t) & Projection
+
+## 1. Data and Piecewise Model
+
+This chunk extends the dataset to 40 weeks and defines a more complex
+SEIR model that handles time-dependent transmission rates (`beta_t`) for
+different phases (Baseline, Quarantine, Carnival, Self-Isolation).
+
+``` r
+############################################################
+# =========================  WEEK 4  =======================
+# PIECEWISE-β SEIR, SSE vs MLE, Re(t) & PROJECTION
+############################################################
+########################################
+# MASTER SCRIPT: SSE vs. MLE Optimization (Including I0, L, D)
+########################################
+
+# Load Required Libraries
+if(!requireNamespace("odin", quietly=TRUE)) {
+  install.packages("odin")
+}
+library(odin)
+library(ggplot2)
+
+########################################
+# 1) Load Observed Weekly Data
+########################################
+data_weekly <- data.frame(
+  week = 1:40,
+  Cases = c(
+    5,1,14,4,10,19,16,21,23,36,39,54,
+    79,89,82,56,79,78,82,83,79,64,58,64,
+    59,76,65,43,68,43,35,48,38,20,13,15,10,9,8,5
+  )
+)
+t_fit <- 1:40    
+
+########################################
+# 2) Compile SEIR Model with Piecewise Transmission
+########################################
+model_gen <- odin::odin({
+  initial(S) <- N - I_0 - E_0
+  initial(E) <- E_0
+  initial(I) <- I_0
+  initial(R) <- 0
+   
+  deriv(S) <- -beta_t * S * I / N
+  deriv(E) <- beta_t * S * I / N - gamma * E
+  deriv(I) <- gamma * E - sigma * I
+  deriv(R) <- sigma * I
+   
+  # Time-dependent transmission rate
+  beta_t <- if (t < 12) beta_baseline else
+    if (t < 20) beta_quarantine else
+      if (t < 28) beta_quarantine else
+        beta_selfisol
+   
+  # Parameters derived from baseline R₀
+  beta_baseline  <- R_0_baseline * sigma
+  beta_quarantine <- beta_baseline * 0.7   # 30% reduction in Quarantine
+  beta_carnival  <- beta_quarantine * 0.9  # 20% increase in Carnival
+  beta_selfisol  <- beta_carnival * 0.7    # 30% reduction in Self-Isolation
+   
+  R_0_baseline  <- user(1.5)  # This is the only R₀ fitted
+  D <- user(4.5/7)
+  L <- user(3.75/7)
+  I_0 <- user(5)
+  E_0 <- user(2)
+  N <- user(80000)
+   
+  gamma <- 1 / L
+  sigma <- 1 / D
+   
+  # Output
+  output(onset) <- gamma * E
+})
+```
+
+    ## ── R CMD INSTALL ───────────────────────────────────────────────────────────────
+    ##   ─  installing *source* package 'odin57de2361' ... (865ms)
+    ##      ** using staged installation
+    ##      ** libs
+    ##      using C compiler: 'gcc.exe (GCC) 13.3.0'
+    ##      gcc  -I"C:/PROGRA~1/R/R-44~1.1/include" -DNDEBUG     -I"C:/RBuildTools/4.4/x86_64-w64-mingw32.static.posix/include"     -O2 -Wall -gdwarf-2 -mfpmath=sse -msse2 -mstackrealign  -UNDEBUG -Wall -pedantic -g -O0 -c odin.c -o odin.o
+    ##      odin.c: In function 'odin_metadata':
+    ##      odin.c:155:18: warning: unused variable 'internal' [-Wunused-variable]
+    ##      155 |   odin_internal *internal = odin_get_internal(internal_p, 1);
+    ##          |                  ^~~~~~~~
+    ##      odin.c: In function 'user_get_scalar_int':
+    ##    odin.c:261:47: warning: format '%d' expects argument of type 'int', but argument 2 has type 'const char *' [-Wformat=]
+    ##      261 |       Rf_error("Expected scalar integer for '%d'", name);
+    ##          |                                              ~^    ~~~~
+    ##          |                                               |    |
+    ##          |                                               int  const char *
+    ##          |                                              %s
+    ##      gcc  -I"C:/PROGRA~1/R/R-44~1.1/include" -DNDEBUG     -I"C:/RBuildTools/4.4/x86_64-w64-mingw32.static.posix/include"     -O2 -Wall -gdwarf-2 -mfpmath=sse -msse2 -mstackrealign  -UNDEBUG -Wall -pedantic -g -O0 -c registration.c -o registration.o
+    ##      gcc -shared -static-libgcc -o odin57de2361.dll tmp.def odin.o registration.o -LC:/RBuildTools/4.4/x86_64-w64-mingw32.static.posix/lib/x64 -LC:/RBuildTools/4.4/x86_64-w64-mingw32.static.posix/lib -LC:/PROGRA~1/R/R-44~1.1/bin/x64 -lR
+    ##      installing to C:/Users/SAUDH~1/AppData/Local/Temp/Rtmpq89rpK/devtools_install_3b42d3c587e/00LOCK-file3b418f6561b/00new/odin57de2361/libs/x64
+    ##   ─  DONE (odin57de2361)
+    ## 
+
+## 2. SSE vs MLE Functions
+
+This chunk defines two different functions for optimization: one based
+on Sum of Squared Errors (SSE) and one based on Maximum Likelihood
+Estimation (MLE) using a Poisson distribution.
+
+``` r
+########################################
+# 3) SSE Function with Intervention-Adjusted Parameters
+########################################
+sse_with_interventions <- function(par) {
+  R0_val <- par[1]
+  D_val  <- par[2]
+  L_val  <- par[3]
+  I0_val <- par[4]
+   
+  # Fixed E₀
+  E0_val <- 2
+   
+  mod_tmp <- model_gen$new(
+    R_0_baseline = R0_val,  
+    D    = D_val,
+    L    = L_val,
+    I_0 = I0_val,
+    E_0 = E0_val,
+    N    = 80000
+  )
+  out_tmp <- mod_tmp$run(t_fit)
+   
+  model_inc <- out_tmp[,"onset"]
+  obs_inc   <- data_weekly$Cases
+  sse_val   <- sum((model_inc - obs_inc)^2)
+   
+  return(sse_val)
+}
+
+########################################
+# 4) MLE Function for Poisson Likelihood
+########################################
+mle_with_interventions <- function(par) {
+  R0_val <- par[1]
+  D_val  <- par[2]
+  L_val  <- par[3]
+  I0_val <- par[4]
+   
+  # Fixed E₀
+  E0_val <- 2
+   
+  mod_tmp <- model_gen$new(
+    R_0_baseline = R0_val,  
+    D    = D_val,
+    L    = L_val,
+    I_0 = I0_val,
+    E_0 = E0_val,
+    N    = 80000
+  )
+  out_tmp <- mod_tmp$run(t_fit)
+   
+  model_inc <- out_tmp[,"onset"]
+  obs_inc   <- data_weekly$Cases
+   
+  # Avoid log(0) issues
+  model_inc <- pmax(model_inc, 1e-6)
+   
+  # Compute log-likelihood (Poisson assumption)
+  log_likelihood <- sum(dpois(obs_inc, lambda = model_inc, log = TRUE))
+   
+  return(-log_likelihood)  # Return negative log-likelihood for minimization
+}
+```
+
+## 3. Optimization and Comparison Plot
+
+This chunk performs the optimization using both SSE and MLE methods,
+prints the best parameters for each, and plots both model fits against
+the 40-week data.
+
+``` r
+########################################
+# 5) Optimize R₀, D, L, I₀ using SSE
+########################################
+start_par <- c(R0=1.5, D=4.5/7, L=3.75/7, I0=5)
+
+fit_sse <- optim(
+  par     = start_par,
+  fn      = sse_with_interventions,
+  method  = "L-BFGS-B",
+  lower   = c(0.5, 3/7, 3/7, 1),   # Min values for R₀, D, L, I₀
+  upper   = c(3.0, 7/7, 7/7, 20)  # Max values for R₀, D, L, I₀
+)
+
+best_par_sse <- fit_sse$par
+best_sse_value <- fit_sse$value
+
+cat("=== SSE Optimization ===\n")
+```
+
+    ## === SSE Optimization ===
+
+``` r
+cat("Best SSE =", best_sse_value, "\n")
+```
+
+    ## Best SSE = 4841.927
+
+``` r
+cat("Best Parameters (SSE):\n")
+```
+
+    ## Best Parameters (SSE):
+
+``` r
+print(best_par_sse)
+```
+
+    ##        R0         D         L        I0 
+    ## 1.4578557 0.6885286 1.0000000 4.9639884
+
+``` r
+########################################
+# 6) Optimize R₀, D, L, I₀ using MLE
+########################################
+fit_mle <- optim(
+  par     = start_par,
+  fn      = mle_with_interventions,
+  method  = "L-BFGS-B",
+  lower   = c(0.5, 3/7, 3/7, 1),
+  upper   = c(3.0, 7/7, 7/7, 20)
+)
+
+best_par_mle <- fit_mle$par
+best_loglike_value <- -fit_mle$value  # Convert back to log-likelihood
+
+cat("\n=== MLE Optimization ===\n")
+```
+
+    ## 
+    ## === MLE Optimization ===
+
+``` r
+cat("Best Log-Likelihood =", best_loglike_value, "\n")
+```
+
+    ## Best Log-Likelihood = -157.663
+
+``` r
+cat("Best Parameters (MLE):\n")
+```
+
+    ## Best Parameters (MLE):
+
+``` r
+print(best_par_mle)
+```
+
+    ##        R0         D         L        I0 
+    ## 1.4855000 0.8030635 1.0000000 5.1220291
+
+``` r
+########################################
+# 7) Run Final Models for SSE and MLE
+########################################
+mod_sse <- model_gen$new(
+  R_0_baseline  = best_par_sse[1],
+  D    = best_par_sse[2],
+  L    = best_par_sse[3],
+  I_0 = best_par_sse[4],
+  E_0 = 2,
+  N    = 80000
+)
+out_sse <- mod_sse$run(t_fit)
+
+mod_mle <- model_gen$new(
+  R_0_baseline  = best_par_mle[1],
+  D    = best_par_mle[2],
+  L    = best_par_mle[3],
+  I_0 = best_par_mle[4],
+  E_0 = 2,
+  N    = 80000
+)
+out_mle <- mod_mle$run(t_fit)
+
+########################################
+# 8) Plot Comparison of SSE vs. MLE Fit
+########################################
+plot(data_weekly$week, data_weekly$Cases, pch=16, col="black",
+     xlab="Week", ylab="Weekly Incidence",
+     main="Fitted Model vs Observed (SSE vs MLE)")
+lines(1:40, out_sse[,"onset"], col="blue", lwd=2, lty=1)
+lines(1:40, out_mle[,"onset"], col="red", lwd=2, lty=2)
+
+# Add vertical lines for intervention points
+abline(v=13, col="red", lty=2)  # Week 13: Quarantine + Carnival
+abline(v=28, col="red", lty=2)  # Week 28: Self-Isolation
+
+legend("topright",
+       legend=c("Observed", "Fitted (SSE)", "Fitted (MLE)", "Intervention Points"),
+       col=c("black", "blue", "red", "red"),
+       lty=c(NA,1,2,2),
+       pch=c(16, NA, NA, NA),
+       lwd=c(NA, 2, 2, 1),
+       bty="n")
+```
+
+![](Outbreak_files/figure-gfm/week4_optimization_plot-1.png)<!-- -->
+
+## 4. Extended Projection
+
+This chunk extends the MLE model fit to 60 weeks to project when the
+epidemic might end (defined as cases dropping below 5).
+
+``` r
+########################################
+# Extend SEIR Model to Predict End of Epidemic
+########################################
+
+# Extend time to 60 weeks (or adjust based on results)
+t_extended <- 1:60  
+
+# Run the model with best-fitting parameters
+mod_extended <- model_gen$new(
+  R_0_baseline  = best_par_mle[1],
+  D    = best_par_mle[2],
+  L    = best_par_mle[3],
+  I_0 = best_par_mle[4],
+  E_0 = 2,
+  N    = 80000
+)
+
+# Run the model for extended time
+out_extended <- mod_extended$run(t_extended)
+data_extended <- as.data.frame(out_extended)
+data_extended$Week <- t_extended
+
+# Plot the projected weekly incidence
+plot(data_extended$Week, data_extended$onset, type="l", col="blue", lwd=2,
+     xlab="Week", ylab="Weekly Incidence",
+     main="Projected Epidemic End (Extended SEIR Model)")
+abline(h=5, col="red", lty=2)  # Threshold for epidemic end
+legend("topright", legend=c("Projected Incidence", "Threshold (5 cases/week)"),
+       col=c("blue", "red"), lty=c(1,2), lwd=c(2,1), bty="n")
+```
+
+![](Outbreak_files/figure-gfm/week4_extended_projection-1.png)<!-- -->
+
+## 5. Re(t) and Epidemic End Calculation
+
+This final chunk calculates the Effective Reproduction Number `Re(t)`
+over time to visualize the impact of interventions and mathematically
+identifies the specific week the epidemic ends.
+
+``` r
+########################################
+# Compute Re Over Time
+########################################
+
+# Compute Re(t) dynamically across different phases
+compute_Re <- function(S, beta_baseline, beta_quarantine, beta_carnival, beta_selfisol, sigma, time_vector) {
+   
+  Re_values <- numeric(length(time_vector))  # Storage for Re over time
+   
+  for (t in seq_along(time_vector)) {
+    if (t <= 12) {  # Baseline period (Weeks 1-12)
+      beta_t <- beta_baseline
+    } else if (t <= 27) {  # Quarantine + Carnival (Weeks 13-27)
+      beta_t <- beta_carnival
+    } else {  # Self-Isolation (Weeks 28+)
+      beta_t <- beta_selfisol
+    }
+     
+    Re_values[t] <- (beta_t / sigma) * S[t] / 80000  # 80000 = Total population size
+  }
+   
+  return(Re_values)
+}
+
+beta_baseline  <- best_par_sse[1] * sigma
+beta_quarantine <- beta_baseline * 0.7   # 30% reduction in Quarantine
+beta_carnival  <- beta_quarantine * 0.9  # 20% increase in Carnival
+beta_selfisol  <- beta_carnival * 0.7
+# Extract S(t) from model output
+S_t <- data_extended[, "S"]  # Ensure you extract the correct column
+
+# Compute Re(t) over time
+Re_t <- compute_Re(S_t, beta_baseline, beta_quarantine, beta_carnival, beta_selfisol, sigma, t_fit)
+
+# Plot Re(t)
+plot(t_fit, Re_t, type="l", col="purple", lwd=2, 
+     xlab="Week", ylab="Effective Reproduction Number (Re)",
+     main="Effective Reproduction Number Over Time")
+abline(h=1, col="red", lty=2)  # Threshold line for epidemic control
+legend("topright", legend=c("Re(t)", "Threshold (Re=1)"), col=c("purple", "red"), lty=c(1,2), lwd=c(2,1))
+```
+
+![](Outbreak_files/figure-gfm/week4_re_calculation-1.png)<!-- -->
+
+``` r
+########################################
+# Identify When Epidemic Ends (Case-Based)
+########################################
+
+# Check when weekly incidence is below 5 for 3 consecutive weeks
+consecutive_weeks_below_threshold <- function(cases, threshold=5, required_weeks=3) {
+  count <- 0
+  for (week in 1:length(cases)) {
+    if (cases[week] < threshold) {
+      count <- count + 1
+      if (count >= required_weeks) {
+        return(week - required_weeks + 1)  # Return the first week when condition is met
+      }
+    } else {
+      count <- 0  # Reset count if threshold is exceeded
+    }
+  }
+  return(NA)  # Return NA if epidemic never ends
+}
+
+epidemic_end_week <- consecutive_weeks_below_threshold(data_extended$onset)
+
+if (!is.na(epidemic_end_week)) {
+  cat("Epidemic is considered over starting from week:", epidemic_end_week, "\n")
+} else {
+  cat("Epidemic does not meet the end criteria within the projection period.\n")
+}
+```
+
+    ## Epidemic is considered over starting from week: 41
